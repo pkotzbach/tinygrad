@@ -104,7 +104,9 @@ class TextDecoder:
     self.getjitted = collections.defaultdict(lambda: TinyJit(self.forward))
 
   def __call__(self, x: Tensor, pos: int, encoded_audio: Tensor):
-    pos = Variable("self_attn_cache_len", 1, self.max_self_attn_cache_len).bind(pos) if pos else 0
+    if pos > self.max_self_attn_cache_len:
+      print("wut")
+    pos = Variable("self_attn_cache_len", 1, 9999).bind(pos) if pos else 0
     return self.getjitted[x.shape](x, pos, encoded_audio)
 
   def forward(self, x:Tensor, pos:Union[Variable, Literal[0]], encoded_audio:Tensor):
@@ -224,6 +226,7 @@ def init_whisper(model_name="tiny.en", batch_size=1):
 
   filename = fetch(MODEL_URLS[model_name])
   state = torch_load(filename)
+  print(state["dims"])
   model = Whisper(state['dims'], batch_size)
   load_state_dict(model, state['model_state_dict'], strict=False)
   enc = get_encoding("multilingual" if model.is_multilingual else "gpt2")
@@ -244,6 +247,7 @@ def transcribe_waveform(model: Whisper, enc, waveforms, truncate=False):
 
   log_spec = prep_audio(waveforms, model.batch_size, truncate)
   nsample = model.decoder.max_tokens_to_sample
+  text_ctx = model.decoder.max_self_attn_cache_len
 
   def inferloop(ctx: Union[np.ndarray, List[np.ndarray]], encoded_audio):
     pos, next_tokens = 0, ctx
@@ -251,7 +255,17 @@ def transcribe_waveform(model: Whisper, enc, waveforms, truncate=False):
       next_tokens = model.decoder(Tensor(next_tokens), pos, encoded_audio)[:, -1].argmax(axis=-1).numpy().astype(np.int32).reshape(-1, 1)
       next_tokens[ctx[:, -1] == eot] = eot
       ctx = np.concatenate((ctx, next_tokens), axis=1)
-      pos = ctx.shape[-1] - 1
+      if ctx.shape[-1] > text_ctx:
+        print("truncating")
+        ctx = np.concatenate((ctx[:, 0:1], ctx[:, -text_ctx:]), axis=1)
+        
+      if len(ctx[0]) > 4:
+        # print(enc.decode([ctx[0][0]]), enc.decode([ctx[0][1]]), enc.decode([ctx[0][-1]]), enc.decode([ctx[0][-2]]))
+        # print(enc.decode(ctx[0]))
+        if enc.decode([ctx[0][-1]]) == enc.decode([ctx[0][-2]]) and enc.decode([ctx[0][-1]]) == enc.decode([ctx[0][-3]]):
+          print("powtorka")
+
+      pos += 1
       if (next_tokens == eot).all(): break
     return ctx
 
@@ -276,7 +290,9 @@ def transcribe_waveform(model: Whisper, enc, waveforms, truncate=False):
     else: ctx = [inferloop((np.array([c]*model.batch_size)), encoded_audio)[i] for i,c in enumerate(ctx)]
 
     for i, (res, arr) in enumerate(zip(transcriptions, ctx)):
-      if curr_frame*HOP_LENGTH <= len(waveforms[i]):res.extend(arr[np.where(arr == start_tokens[-1])[0][0]+1:eoti[0] if len (eoti:=np.where(arr == eot)[0]) else None])
+      if curr_frame*HOP_LENGTH <= len(waveforms[i]):
+        res.extend(arr[np.where(arr == start_tokens[-1])[0][0]+1:eoti[0] if len (eoti:=np.where(arr == eot)[0]) else None])
+        
     ctx = [[enc._special_tokens['<|startofprev|>']]+gettexttoks(cs)+start_tokens for cs in ctx]
 
   transcriptions = list(map(lambda tokens: enc.decode(tokens).strip(), transcriptions))
@@ -298,7 +314,7 @@ def listener(q):
 
 if __name__ == "__main__":
   model, enc = init_whisper("small.en" if getenv("SMALL") else "tiny.en", batch_size=1)
-
+  print(transcribe_file(model, enc, "cut.mp3"))
   if len(sys.argv) > 1:
     print(transcribe_file(model, enc, sys.argv[1]))
   else:
