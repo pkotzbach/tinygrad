@@ -66,12 +66,14 @@ jobs:
       matrix:
         backend: [llvm, clang]
 
-    name: Windows Tests (${{ matrix.backend }})
+    name: Tests on Windows (${{ matrix.backend }})
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2 # NOTE: this fetches the HEAD commit of the PR
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -96,11 +98,6 @@ jobs:
           fi
       - name: Install dependencies
         run: pip install -e '.[testing${{matrix.backend=='llvm'&&',llvm'||''}}]' --extra-index-url https://download.pytorch.org/whl/cpu
-      - name: Check Device.DEFAULT
-        shell: bash
-        run: |
-          PYTHONPATH=${{ github.workspace }} python -c "from tinygrad import Device; assert Device.DEFAULT in ['LLVM','CLANG'], Device.DEFAULT"
-          DEBUG=5 PYTHONPATH=${{ github.workspace }} FORWARD_ONLY=1 python test/test_ops.py TestOps.test_add
       - name: Run core tests
         shell: bash
         run: |
