@@ -651,11 +651,6 @@ jobs:
           elif [[ "${{ matrix.backend }}" == "clang" ]]; then
             echo "CLANG=1" >> $GITHUB_ENV
           fi
-      - name: Install LLVM (if needed)
-        if: matrix.backend == 'llvm'
-        run: |
-          choco install llvm -y
-          refreshenv
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
