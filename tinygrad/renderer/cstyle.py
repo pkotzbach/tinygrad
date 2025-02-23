@@ -72,7 +72,8 @@ extra_pm = PatternMatcher([
   (UPat(Ops.WHERE, name="alu"), no_vectorized_alu),
 ])
 
-def uops_to_dtypes(uops:list[UOp]) -> list[DType]: return dedup(u.dtype for u in uops if not isinstance(u.dtype, (ImageDType, PtrDType)))
+def uops_to_dtypes(uops:list[UOp]) -> list[DType]:
+  return dedup(u.dtype.base if isinstance(u.dtype, PtrDType) else u.dtype for u in uops if not isinstance(u.dtype, ImageDType))
 
 class CStyleLanguage(Renderer):
   kernel_prefix: str = ""
