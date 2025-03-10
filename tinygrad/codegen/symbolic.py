@@ -387,31 +387,16 @@ arange_m = ((arange_augrng<UPat.cvar("compval"))!=UPat(Ops.CONST, name="ne", arg
 # this moves the accumulation variable down an unrolled add chain which allows for more efficient accumulation using mulacc
 mulacc_unrolled = PatternMatcher([(UPat.var("x")+UPat.var("y")+acc_pat, lambda x,y,acc: (acc+x)+y if y.op is not Ops.DEFINE_ACC else None)])
 
-def my_cat(sink, store, loop, add, load1, load2, lt):
-  max = loop.src[1].src[0].src[0].src[1].arg
-  loop2_range = deepcopy(UOp.range(dtype=dtypes.int, idx=1000, start=lt.arg, end=max))
-  loop.src[1].src[0].src[0].src[1].arg = lt.arg
+def my_cat(sink, store, loop, add, load1, load2, lt, outer, inner):
+  max = outer.src[1]
+  # store1
+  outer = outer.replace(src=(outer.src[0], lt))
   load1.src[0].src = load1.src[0].src[:2]
-  add.src = (add.src[0],UOp.const(dtypes.int, 0))
-  # load2_copy = deepcopy(load2)
-  # load2.op=Ops.CONST
-  # load2.dtype=dtypes.int
-  # load2.src=()
-  # load2.arg=0
+  load1.src[0].src[1].src[0].src = (outer, load1.src[0].src[1].src[0].src[1])
+  add.src=(add.src[0],UOp.const(dtypes.int, 0))
 
-  # UOp(Ops.INDEX, dtypes.float.ptr(524288), arg=None, src=(
-  # UOp(Ops.DEFINE_GLOBAL, dtypes.float.ptr(524288), arg=0, src=()),
-  # UOp(Ops.ADD, dtypes.int, arg=None, src=(
-  #   UOp(Ops.MUL, dtypes.int, arg=None, src=(
-  #     UOp(Ops.RANGE, dtypes.int, arg=0, src=(
-  #       x4:=UOp(Ops.CONST, dtypes.int, arg=0, src=()),
-  #       UOp(Ops.CONST, dtypes.int, arg=512, src=()),)),
-  #     x6:=UOp(Ops.CONST, dtypes.int, arg=1024, src=()),)),
-  #   UOp(Ops.RANGE, dtypes.int, arg=1, src=(
-  #      x4,
-  #      x6,)),)),))
-
-  loop2 = loop.replace(src=(loop.src[0],loop2_range*lt+loop.src[1].src[1].replace(arg=1001)))
+  # store2
+  loop2 = loop.replace(src=(loop.src[0],UOp.range(dtype=dtypes.int, idx=1000, start=lt.arg, end=max)*lt+loop.src[1].src[1].replace(arg=1001)))
   load2.src[0].src = load2.src[0].src[:2]
   load2.src[0].src[1].src = (loop2.src[1], load2.src[0].src[1].src[1])
   store2 = UOp(Ops.STORE, store.dtype, src=(loop2, load2+UOp.const(dtypes.int, 0)))
@@ -505,7 +490,7 @@ sym = symbolic_flat+PatternMatcher([
   (UPat.var("x") * ((1+UPat.var("x")).reciprocal().named("d")), lambda x,d: 1-d), # x*/(1+x) -> 1-1/(1+x)
   (UPat.var("x") * ((1+UPat.var("x")).reciprocal().named("d")*UPat.var("y")), lambda x,y,d: y*(1-d)),
   (UPat.var("x") * ((1+UPat.var("x")).reciprocal().named("d")+UPat.var("y")), lambda x,y,d: (1-d)+x*y),
-  (UPat(Ops.SINK, name="sink", src=(UPat(Ops.STORE, name="store", src=(UPat().named("loop"),
+  (UPat(Ops.SINK, name="sink", src=(UPat(Ops.STORE, name="store", src=(UPat(Ops.INDEX, name="loop", src=(UPat(), UPat(Ops.RANGE, name="outer")*UPat.cvar()+UPat(Ops.RANGE, name="inner"))),
     UPat(Ops.ADD, name="add",
          src=(UPat(Ops.LOAD, name="load1", src=(UPat(Ops.INDEX, src=(UPat(), UPat(), UPat(Ops.CMPLT, src=(UPat(), UPat.cvar("lt"))))))), UPat().named("load2"))))))), my_cat),
 ])
