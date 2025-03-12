@@ -387,7 +387,7 @@ arange_m = ((arange_augrng<UPat.cvar("compval"))!=UPat(Ops.CONST, name="ne", arg
 # this moves the accumulation variable down an unrolled add chain which allows for more efficient accumulation using mulacc
 mulacc_unrolled = PatternMatcher([(UPat.var("x")+UPat.var("y")+acc_pat, lambda x,y,acc: (acc+x)+y if y.op is not Ops.DEFINE_ACC else None)])
 
-def my_cat(sink, store, loop, add, load1, load2, lt, outer, inner):
+def my_cat(sink, store, loop, add, load1, load2, lt, outer):
   max = outer.src[1]
   # store1
   outer = outer.replace(src=(outer.src[0], lt))
@@ -401,6 +401,30 @@ def my_cat(sink, store, loop, add, load1, load2, lt, outer, inner):
   load2.src[0].src[1].src = (loop2.src[1], load2.src[0].src[1].src[1])
   store2 = UOp(Ops.STORE, store.dtype, src=(loop2, load2+UOp.const(dtypes.int, 0)))
   ret = sink.replace(src=(store, store2,))
+  print("----------------------")
+  print("my_cat_vec")
+  print(ret)
+  return ret
+
+def my_cat_vec(sink, store, loop, add, load1, load2, lt, outer, idx, vconst):
+  max = outer.src[1]
+  if lt.arg >= max.arg: return None
+  # store1
+  outer = outer.replace(src=(outer.src[0], lt))
+  load1.src[0].src = load1.src[0].src[:2]
+  load1.src[0].src[1].src[0].src[0].src[0].src = (outer, load1.src[0].src[1].src[0].src[0].src[0].src[1])
+  add.src=(add.src[0],UOp.const(dtypes.int, 0))
+
+  # store2
+  vec_loop2 = loop.src[0].replace(src=(UOp.range(dtype=dtypes.int, idx=1000, start=lt.arg, end=max)*lt, loop.src[0].src[1].src[0].replace(arg=1001)*loop.src[0].src[1].src[1]))
+  loop2 = loop.replace(src=tuple(vec_loop2 for _ in range(loop.dtype.count)))
+  load2.src[0].src = load2.src[0].src[:2]
+  load2.src[0].src[1].src = (loop2, load2.src[0].src[1].src[1])
+  store2 = UOp(Ops.STORE, store.dtype, src=(store.src[0].replace(src=(store.src[0].src[0], loop2+vconst)), load2+UOp.const(dtypes.int, 0)))
+  ret = sink.replace(src=(store, store2,))
+  # print("----------------------")
+  # print("my_cat_vec")
+  # print(ret)
   return ret
 
 # this is symbolic 2.0
@@ -490,7 +514,18 @@ sym = symbolic_flat+PatternMatcher([
   (UPat.var("x") * ((1+UPat.var("x")).reciprocal().named("d")), lambda x,d: 1-d), # x*/(1+x) -> 1-1/(1+x)
   (UPat.var("x") * ((1+UPat.var("x")).reciprocal().named("d")*UPat.var("y")), lambda x,y,d: y*(1-d)),
   (UPat.var("x") * ((1+UPat.var("x")).reciprocal().named("d")+UPat.var("y")), lambda x,y,d: (1-d)+x*y),
-  (UPat(Ops.SINK, name="sink", src=(UPat(Ops.STORE, name="store", src=(UPat(Ops.INDEX, name="loop", src=(UPat(), UPat(Ops.RANGE, name="outer")*UPat.cvar()+UPat(Ops.RANGE, name="inner"))),
-    UPat(Ops.ADD, name="add",
-         src=(UPat(Ops.LOAD, name="load1", src=(UPat(Ops.INDEX, src=(UPat(), UPat(), UPat(Ops.CMPLT, src=(UPat(), UPat.cvar("lt"))))))), UPat().named("load2"))))))), my_cat),
-])
+  # (UPat(Ops.SINK, name="sink", src=(UPat(Ops.STORE, name="store", src=(UPat(Ops.INDEX, name="loop", src=(UPat(Ops.DEFINE_GLOBAL), UPat(Ops.RANGE, name="outer")*UPat.cvar()+UPat(Ops.RANGE))),
+  #   UPat(Ops.ADD, name="add",
+  #        src=(UPat(Ops.LOAD, name="load1", src=(UPat(Ops.INDEX, src=(UPat(), UPat(), UPat(Ops.CMPLT, src=(UPat(), UPat.cvar("lt"))))))), UPat().named("load2"))))))), my_cat),
+
+  (UPat(Ops.SINK, name="sink", src=(UPat(Ops.STORE, name="store", src=(
+                                      UPat(Ops.INDEX, name="idx", src=(
+                                        UPat(Ops.VECTORIZE),
+                                        UPat(Ops.ADD, src=(
+                                          UPat(Ops.VECTORIZE, name="loop", src=(UPat(Ops.RANGE, name="outer")*UPat.cvar()+UPat(Ops.RANGE)*UPat.cvar())),
+                                          UPat(Ops.VCONST, name="vconst"))))),
+                                      UPat(Ops.ADD, name="add", src=(
+                                        UPat(Ops.LOAD, name="load1", src=(
+                                          UPat(Ops.INDEX, src=(UPat(), UPat(), UPat(Ops.VECTORIZE, src=UPat(Ops.CMPLT, src=(UPat(), UPat.cvar("lt")))))))),
+                                        UPat(Ops.LOAD, name="load2"))))))), my_cat_vec),
+  ])
