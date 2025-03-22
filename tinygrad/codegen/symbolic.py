@@ -406,18 +406,26 @@ def my_cat(sink, store, loop, add, load1, load2, lt, outer):
   print(ret)
   return ret
 
-def my_cat_vec(sink, store, loop, add, load1, load2, lt, outer, idx, vconst):
-  max = outer.src[1]
+def my_cat_vec(sink, store, loop, load1, load2, lt, idx, vconst, rng, add_loads, mul, rng2=None, mul2=None, add=None):
+  if rng2 is not None and rng2.arg < rng.arg:
+    temp = rng2
+    temp2 = mul2
+    rng2 = rng
+    mul2 = mul
+    rng = temp
+    mul = temp2
+  max = rng.src[1]
   if lt.arg >= max.arg: return None
   # store1
-  outer = outer.replace(src=(outer.src[0], lt))
+  rng = rng.replace(src=(rng.src[0], lt))
+  loop = loop.replace(src=tuple(rng*mul+rng2*mul2 if add is None else rng*mul+add for _ in range(loop.dtype.count)))
   load1.src[0].src = load1.src[0].src[:2]
-  load1.src[0].src[1].src[0].src[0].src[0].src = (outer, load1.src[0].src[1].src[0].src[0].src[0].src[1])
-  add.src=(add.src[0],UOp.const(dtypes.int, 0))
+  load1.src[0].src[1].src = (loop, load1.src[0].src[1].src[1])
+  add_loads.src=(load1,UOp.const(dtypes.int, 0))
 
   # store2
-  vec_loop2 = loop.src[0].replace(src=(UOp.range(dtype=dtypes.int, idx=1000, start=lt.arg, end=max)*lt, loop.src[0].src[1].src[0].replace(arg=1001)*loop.src[0].src[1].src[1]))
-  loop2 = loop.replace(src=tuple(vec_loop2 for _ in range(loop.dtype.count)))
+  rng_new = UOp.range(dtype=dtypes.int, idx=1000, start=lt.arg, end=max)
+  loop2 = loop.replace(src=tuple(rng_new*mul+rng2.replace(arg=10001)*mul2 if add is None else rng*mul+add for _ in range(loop.dtype.count)))
   load2.src[0].src = load2.src[0].src[:2]
   load2.src[0].src[1].src = (loop2, load2.src[0].src[1].src[1])
   store2 = UOp(Ops.STORE, store.dtype, src=(store.src[0].replace(src=(store.src[0].src[0], loop2+vconst)), load2+UOp.const(dtypes.int, 0)))
@@ -522,9 +530,9 @@ sym = symbolic_flat+PatternMatcher([
                                       UPat(Ops.INDEX, name="idx", src=(
                                         UPat(Ops.VECTORIZE),
                                         UPat(Ops.ADD, src=(
-                                          UPat(Ops.VECTORIZE, name="loop", src=(UPat(Ops.RANGE, name="outer")*UPat.cvar()+UPat(Ops.RANGE)*UPat.cvar())),
+                                          UPat(Ops.VECTORIZE, name="loop", src=UPat.any(UPat(Ops.RANGE, name="rng")*UPat.var("mul")+UPat(Ops.RANGE, name="rng2")*UPat.var("mul2"),UPat(Ops.RANGE, name="rng")*UPat.var("mul")+UPat.var("add"))),
                                           UPat(Ops.VCONST, name="vconst"))))),
-                                      UPat(Ops.ADD, name="add", src=(
+                                      UPat(Ops.ADD, name="add_loads", src=(
                                         UPat(Ops.LOAD, name="load1", src=(
                                           UPat(Ops.INDEX, src=(UPat(), UPat(), UPat(Ops.VECTORIZE, src=UPat(Ops.CMPLT, src=(UPat(), UPat.cvar("lt")))))))),
                                         UPat(Ops.LOAD, name="load2"))))))), my_cat_vec),

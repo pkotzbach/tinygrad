@@ -685,6 +685,16 @@ class Kernel:
     #if __debug__: type_verify(list(modified_ast.toposort), shape_spec)
 
     self.uops:list[UOp] = linearize_uop(full_graph_rewrite(rewrite_shapetracker_with_index(modified_ast, self.opts), self.opts))
+
+    count = 0
+    for op in self.uops:
+        if op.op == Ops.ENDRANGE:
+            count += 1
+            if count == 4:
+                print("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")
+        else:
+            count = 0  # Reset count if sequence breaks
+
     if DEBUG >= 5: print_uops(self.uops)
     return self
 

@@ -210,10 +210,6 @@ def move_mask(x:UOp, buf:UOp, idx:UOp, mask:UOp, cast:UOp|None=None) -> UOp:
   nidx = buf.index(idx).cast(cast.dtype) if cast is not None else buf.index(idx)
   return UOp.load(nidx, x.const_like(0), mask, *x.src[1:], dtype=x.dtype) if x.op is Ops.LOAD else UOp.store(nidx, x.src[1], mask, *x.src[2:])
 
-def my_cat(vec, gep1, gep2, op, add):
-  assert gep1.src[0].dtype == gep2.src[0].dtype
-  return UOp.load(op.where(gep1.src[0].src[0], gep2.src[0].src[0]), dtype=dtypes.float.vec(4))
-
 pm_render = PatternMatcher([
   # for rendering, we use explicit VECTORIZE
   (UPat(Ops.CONST, name='c'),
@@ -228,72 +224,15 @@ pm_render = PatternMatcher([
   (UPat(Ops.STORE, dtype=dtypes.void, src=(UPat(), UPat(), UPat(dtype=dtypes.bool)), name="store"),
     lambda store: UOp(Ops.STORE, src=store.src[:2]+(UOp(Ops.IF, src=(store.src[2],)),))),
 
-  (UPat(Ops.VECTORIZE, src=(UPat(Ops.ADD, name="add", src=(UPat(Ops.GEP, name="gep1", src=UPat(Ops.LOAD, src=(UPat(),
-                      UPat(Ops.VECTORIZE, dtype=dtypes.float.vec(4), src=(UPat.cvar(arg=0.0), UPat.cvar(arg=0.0), UPat.cvar(arg=0.0), UPat.cvar(arg=0.0)), name="vec"),
-                      UPat().named("op")))),
-                      UPat(Ops.GEP, name="gep2", src=UPat(Ops.LOAD, src=(UPat()))))), UPat(), UPat(), UPat())),
-  my_cat),
+  # extra matcher
+  # (UPat(Ops.STORE, name="store", src=(UPat().named("loop"),
+  #   UPat(Ops.VECTORIZE, src=(UPat(Ops.ADD, name="add", src=(UPat(Ops.GEP, name="gep1", src=UPat(Ops.LOAD, src=(UPat(),
+  #                     UPat(Ops.VECTORIZE, dtype=dtypes.float.vec(4), src=(UPat.cvar(arg=0.0), UPat.cvar(arg=0.0), UPat.cvar(arg=0.0), UPat.cvar(arg=0.0)), name="vec"),
+  #                     UPat().named("op")))),
+  #                     UPat(Ops.GEP, name="gep2", src=UPat(Ops.LOAD, src=(UPat()))))), UPat(), UPat(), UPat())))),
+  # my_cat),
 ])
 
-# UOp(Ops.SINK, dtypes.void, arg=KernelInfo(name='E_2048_256_4', local_dims=0, upcasted=1, dont_use_locals=False), src=(
-#   UOp(Ops.STORE, dtypes.void, arg=None, src=(
-#     UOp(Ops.CAST, dtypes.float.vec(4).ptr(2097152), arg=None, src=(
-#       UOp(Ops.INDEX, dtypes.float.ptr(2097152), arg=None, src=(
-#         UOp(Ops.DEFINE_GLOBAL, dtypes.float.ptr(2097152), arg=0, src=()),
-#         x4:=UOp(Ops.ADD, dtypes.int, arg=None, src=(
-#           UOp(Ops.SHL, dtypes.int, arg=None, src=(
-#             x6:=UOp(Ops.RANGE, dtypes.int, arg=0, src=(
-#               x7:=UOp(Ops.CONST, dtypes.int, arg=0, src=()),
-#               UOp(Ops.CONST, dtypes.int, arg=2048, src=()),)),
-#             UOp(Ops.CONST, dtypes.int, arg=10, src=()),)),
-#           UOp(Ops.SHL, dtypes.int, arg=None, src=(
-#             UOp(Ops.RANGE, dtypes.int, arg=1, src=(
-#                x7,
-#               UOp(Ops.CONST, dtypes.int, arg=256, src=()),)),
-#             UOp(Ops.CONST, dtypes.int, arg=2, src=()),)),)),)),)),
-#     UOp(Ops.VECTORIZE, dtypes.float.vec(4), arg=None, src=(
-      # UOp(Ops.ADD, dtypes.float, arg=None, src=(
-      #   UOp(Ops.GEP, dtypes.float, arg=(0,), src=(
-      #     x17:=UOp(Ops.LOAD, dtypes.float.vec(4), arg=None, src=(
-      #       UOp(Ops.CAST, dtypes.float.vec(4).ptr(1048576), arg=None, src=(
-      #         UOp(Ops.INDEX, dtypes.float.ptr(1048576), arg=None, src=(
-      #           UOp(Ops.DEFINE_GLOBAL, dtypes.float.ptr(1048576), arg=1, src=()),
-      #            x4,)),)),
-      #       x21:=UOp(Ops.VECTORIZE, dtypes.float.vec(4), arg=None, src=(
-      #         x22:=UOp(Ops.CONST, dtypes.float, arg=0.0, src=()),
-      #          x22,
-      #          x22,
-      #          x22,)),
-      #       x23:=UOp(Ops.CMPLT, dtypes.bool, arg=None, src=(
-      #          x6,
-      #         UOp(Ops.CONST, dtypes.int, arg=1024, src=()),)),)),)),
-#         UOp(Ops.GEP, dtypes.float, arg=(0,), src=(
-#           x26:=UOp(Ops.LOAD, dtypes.float.vec(4), arg=None, src=(
-#             UOp(Ops.CAST, dtypes.float.vec(4).ptr(1048576), arg=None, src=(
-#               UOp(Ops.INDEX, dtypes.float.ptr(1048576), arg=None, src=(
-#                 UOp(Ops.DEFINE_GLOBAL, dtypes.float.ptr(1048576), arg=2, src=()),
-#                 UOp(Ops.ADD, dtypes.int, arg=None, src=(
-#                    x4,
-#                   UOp(Ops.CONST, dtypes.int, arg=-1048576, src=()),)),)),)),
-#              x21,
-#             UOp(Ops.CMPNE, dtypes.bool, arg=None, src=(
-#                x23,
-#               UOp(Ops.CONST, dtypes.bool, arg=True, src=()),)),)),)),)),
-#       UOp(Ops.ADD, dtypes.float, arg=None, src=(
-#         UOp(Ops.GEP, dtypes.float, arg=(1,), src=(
-#            x17,)),
-#         UOp(Ops.GEP, dtypes.float, arg=(1,), src=(
-#            x26,)),)),
-#       UOp(Ops.ADD, dtypes.float, arg=None, src=(
-#         UOp(Ops.GEP, dtypes.float, arg=(2,), src=(
-#            x17,)),
-#         UOp(Ops.GEP, dtypes.float, arg=(2,), src=(
-#            x26,)),)),
-#       UOp(Ops.ADD, dtypes.float, arg=None, src=(
-#         UOp(Ops.GEP, dtypes.float, arg=(3,), src=(
-#            x17,)),
-#         UOp(Ops.GEP, dtypes.float, arg=(3,), src=(
-#            x26,)),)),)),)),))
 
 # *** uop graph ***
 
@@ -302,15 +241,12 @@ def full_graph_rewrite(sink:UOp, opts:Optional[Renderer]=None) -> UOp:
   supported_ops = tuple(opts.code_for_op.keys()) if opts is not None else ()
   extra_matcher = opts.extra_matcher if opts is not None and opts.extra_matcher is not None else PatternMatcher([])
 
+  # sink = graph_rewrite(sink, sym)
+  # print(sink)
   if DEVECTORIZE:
     # devectorize + load_store_indexing + mulacc_unrolled, mulacc_unrolled must be last because it can break loop_collapse
     sink = graph_rewrite(sink, sym+(devectorize+float4_folding if opts is not None and opts.supports_float4 else devectorize)+load_store_indexing+
       mulacc_unrolled)
-    # sink = graph_rewrite(sink, sym) # nie
-    # sink = graph_rewrite(sink, devectorize) # tu?
-    # sink = graph_rewrite(sink, float4_folding)
-    # sink = graph_rewrite(sink, load_store_indexing)
-    # sink = graph_rewrite(sink, mulacc_unrolled)
   else:
     # new devectorize only for load/store
     sink = graph_rewrite(sink, sym+devectorize_load_store+mulacc_unrolled)
