@@ -1,16 +1,15 @@
 import functools, struct
 from tinygrad.device import  Compiled, Allocator, Compiler
 from tinygrad.renderer.wgsl import WGSLRenderer
-from tinygrad.helpers import round_up, OSX
+from tinygrad.helpers import round_up
 from tinygrad.runtime.autogen import webgpu
 from typing import List, Any
 import ctypes
+import os
 
-try:
-  instance = webgpu.wgpuCreateInstance(webgpu.WGPUInstanceDescriptor(features = webgpu.WGPUInstanceFeatures(timedWaitAnyEnable = True)))
-except AttributeError:
-  raise RuntimeError("Cannot find dawn library. Install it with: " + ("brew tap wpmed92/dawn && brew install dawn" if OSX else
-  "sudo curl -L https://github.com/wpmed92/pydawn/releases/download/v0.1.6/libwebgpu_dawn.so -o /usr/lib/libwebgpu_dawn.so"))
+backend_types = {v: k for k, v in webgpu.WGPUBackendType__enumvalues.items() }
+
+instance = webgpu.wgpuCreateInstance(webgpu.WGPUInstanceDescriptor(features = webgpu.WGPUInstanceFeatures(timedWaitAnyEnable = True)))
 
 def to_c_string(_str): return ctypes.create_string_buffer(_str.encode('utf-8'))
 
@@ -193,7 +192,9 @@ class WebGpuDevice(Compiled):
     # Requesting an adapter
     adapter_res = _run(webgpu.wgpuInstanceRequestAdapterF, webgpu.WGPURequestAdapterCallbackInfo, webgpu.WGPURequestAdapterCallback,
     webgpu.WGPURequestAdapterStatus__enumvalues, 1, 2, instance,
-    webgpu.WGPURequestAdapterOptions(powerPreference=webgpu.WGPUPowerPreference_HighPerformance))
+
+    webgpu.WGPURequestAdapterOptions(powerPreference=webgpu.WGPUPowerPreference_HighPerformance,
+      backendType=backend_types.get(os.getenv("WEBGPU_BACKEND", ""), 0)))
 
     # Get supported features
     supported_features = webgpu.WGPUSupportedFeatures()

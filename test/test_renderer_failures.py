@@ -38,7 +38,7 @@ class TestCStyleFailures(unittest.TestCase):
     store = UOp.store(a.index(idx), alu)
     sink = UOp(Ops.SINK, dtypes.void, (store,))
     uops = linearize_uop(full_graph_rewrite(sink, Device[Device.DEFAULT].renderer))
-    # CLANG doesn't use the max function
+    # CPU doesn't use the max function
     ret = _test_uop_result([Tensor([1])], uops)[0]
     self.assertEqual(ret[0], 1)
 
@@ -53,6 +53,7 @@ class TestPTXFailures(unittest.TestCase):
     ret = _test_uop_result([], uops, local_size=[4, 1, 1])[0]
     np.testing.assert_equal(ret, [0, 1, 1, 1])
 
+  @unittest.skip("INDEX can only have a gate ALU parent, not an IF")
   def test_gated_store_with_if(self):
     a = UOp(Ops.DEFINE_GLOBAL, dtypes.int.ptr(), (), 0)
     gate_alu = (lidx0:=UOp(Ops.SPECIAL, dtypes.int, (), ('lidx0', 4))).ne(0)
@@ -68,8 +69,8 @@ class TestPTXFailures(unittest.TestCase):
   def test_gated_define_acc_with_half_dtype(self):
     a = Tensor.randn(32, 32, dtype=dtypes.half).realize()
     b = Tensor.randn(34, 32, dtype=dtypes.half).realize()
-    result = a.pad((1,1)).matmul(b, acc_dtype=dtypes.half).numpy()
-    reference = a.pad((1,1)).matmul(b, acc_dtype=dtypes.float).numpy()
+    result = a.pad((1,1)).matmul(b, dtype=dtypes.half).numpy()
+    reference = a.pad((1,1)).matmul(b, dtype=dtypes.float).numpy()
     np.testing.assert_allclose(result, reference)
 
 if __name__ == '__main__':

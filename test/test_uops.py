@@ -106,11 +106,11 @@ class TestUOps(unittest.TestCase):
             self._equal(f([a,b,c], op, dts), fxn(a,b,c))
 
 class TestFloatUOps(TestUOps):
-  @unittest.skipIf(Device.DEFAULT == "CLANG", 'not supported as uop')
+  @unittest.skipIf(Device.DEFAULT == "CPU", 'not supported as uop')
   def test_exp2(self): self._test_uop_fxn(Ops.EXP2, lambda a: np.exp2(a))
-  @unittest.skipIf(Device.DEFAULT == "CLANG", 'not supported as uop')
+  @unittest.skipIf(Device.DEFAULT == "CPU", 'not supported as uop')
   def test_log2(self): self._test_uop_fxn(Ops.LOG2, lambda a: math.log2(a) if a > 0 else float('-inf' if a==0 else 'nan'))
-  @unittest.skipIf(Device.DEFAULT == "CLANG", 'not supported as uop')
+  @unittest.skipIf(Device.DEFAULT == "CPU", 'not supported as uop')
   def test_sin(self): self._test_uop_fxn(Ops.SIN, lambda a: math.sin(a))
   def test_recip(self): self._test_uop_fxn(Ops.RECIP, lambda a: 1/a if a != 0 else float('inf'))
   def test_sqrt(self): self._test_uop_fxn(Ops.SQRT, lambda a: math.sqrt(a) if a >= 0 else float('nan'))
@@ -247,10 +247,10 @@ class TestGatedStoreRewrite(unittest.TestCase):
   def test_tiny_gate_store(self):
     gmem = UOp(Ops.DEFINE_GLOBAL, dtypes.float.ptr(), (), 0)
     gidx0 = UOp(Ops.SPECIAL, dtypes.int, (), ('gidx0', 4))
-    idx = UOp(Ops.INDEX, dtypes.float.ptr(), (gmem, gidx0 * UOp.const(dtypes.int, 2)))
-    val = UOp.const(dtypes.float, 42.0)
     gate = gidx0<UOp.const(dtypes.int, 1)
-    store = UOp(Ops.STORE, dtypes.void, (idx, val, gate))
+    idx = UOp(Ops.INDEX, dtypes.float.ptr(), (gmem, gidx0 * UOp.const(dtypes.int, 2), gate))
+    val = UOp.const(dtypes.float, 42.0)
+    store = UOp(Ops.STORE, dtypes.void, (idx, val))
     uops = to_uops_list([store])
     if DEBUG >= 4: print(Device[Device.DEFAULT].renderer.render("test", uops))
     if_uop = next(u for u in uops if u.op is Ops.IF)
@@ -265,11 +265,10 @@ class TestGatedStoreRewrite(unittest.TestCase):
     gmem1 = UOp(Ops.DEFINE_GLOBAL, dtypes.float.ptr(), (), 1)
     gidx0 = UOp(Ops.SPECIAL, dtypes.int, (), ('gidx0', 4))
     idx = gidx0 * UOp.const(dtypes.int, 2)
-    idx0 = UOp(Ops.INDEX, dtypes.float.ptr(), (gmem0, idx))
+    idx0 = UOp(Ops.INDEX, dtypes.float.ptr(), (gmem0, idx, gidx0<UOp.const(dtypes.int, 1)))
     idx1 = UOp(Ops.INDEX, dtypes.float.ptr(), (gmem1, idx))
     val = UOp.const(dtypes.float, 42.0)
-    gate = gidx0<UOp.const(dtypes.int, 1)
-    stores = [UOp.store(idx0, val, gate), UOp.store(idx1, val)]
+    stores = [UOp.store(idx0, val), UOp.store(idx1, val)]
     uops = to_uops_list(stores)
     if DEBUG >= 4: print(Device[Device.DEFAULT].renderer.render("test", uops))
     if_uop = next(u for u in uops if u.op is Ops.IF)
@@ -285,11 +284,11 @@ class TestGatedStoreRewrite(unittest.TestCase):
     gmem1 = UOp(Ops.DEFINE_GLOBAL, dtypes.float.ptr(), (), 1)
     gidx0 = UOp(Ops.SPECIAL, dtypes.int, (), ('gidx0', 4))
     idx = gidx0*UOp.const(dtypes.int, 2)
-    idx0 = UOp(Ops.INDEX, dtypes.float.ptr(), (gmem0, idx))
-    idx1 = UOp(Ops.INDEX, dtypes.float.ptr(), (gmem1, idx))
-    val = UOp.const(dtypes.float, 42.0)
     gate = gidx0<UOp.const(dtypes.int, 1)
-    stores = [UOp.store(idx0, val, gate), UOp.store(idx1, val, gate)]
+    idx0 = UOp(Ops.INDEX, dtypes.float.ptr(), (gmem0, idx, gate))
+    idx1 = UOp(Ops.INDEX, dtypes.float.ptr(), (gmem1, idx, gate))
+    val = UOp.const(dtypes.float, 42.0)
+    stores = [UOp.store(idx0, val), UOp.store(idx1, val)]
     uops = to_uops_list(stores)
     if DEBUG >= 4: print(Device[Device.DEFAULT].renderer.render("test", uops))
     ifs = [u for u in uops if u.op is Ops.IF]
@@ -323,6 +322,7 @@ class TestLocalAccess(unittest.TestCase):
     self.assertEqual(_test_uops_result(dtypes.uint8, uops, sres), 42)
 
   @unittest.skipUnless(Device[Device.DEFAULT].renderer.has_shared, "test requires shared memory")
+  @unittest.skip("tinygrad doesn't support this behavior")
   def test_local_indirect(self):
     uops = []
     smem = uop(uops, Ops.DEFINE_LOCAL, dtypes.int32.ptr(size=16, local=True), (), 'smem')

@@ -19,15 +19,16 @@ def helper_realized_ast(r:Union[Tensor, list[Tensor]]) -> tuple[UOp, list[Buffer
   if isinstance(r, Tensor): r = [r]
   s = Tensor.schedule(*r)
   run_schedule(s[:-1])  # run all kernels except the last one
-  # now all input LazyBuffers buffers in s[-1] should be realized
-  # create fresh buffers for the output buffer
-  bufs = [Buffer((x).device, x.size, x.dtype).allocate() if x in s[-1].outputs else x for x in s[-1].bufs]
+  assert s[-1].ast.op is Ops.SINK, f"helper_realized_ast expects a SINK {s[-1]}"
+  # now all input buffers in s[-1] should be realized
+  # create fresh buffers for the outputs
+  bufs = [Buffer((x).device, x.size, x.dtype).allocate() if i < len(s[-1].ast.src) else x for i,x in enumerate(s[-1].bufs)]
   return s[-1].ast, bufs
 
 def helper_tc_allclose(n:int, m:int, k:int, dtype_in:DType, dtype_out:DType, axis:int=0, tc_select:int=-1, tc_opt:int=0):
   a, b = Tensor.rand(m, k, dtype=dtype_in), Tensor.rand(k, n, dtype=dtype_in)
   np_a, np_b = a.numpy(), b.numpy()
-  r = a.matmul(b, acc_dtype=dtype_out)
+  r = a.matmul(b, dtype=dtype_out)
   sched = r.schedule()
   realized_ast = sched[-1].ast
   run_schedule(sched)
@@ -46,7 +47,7 @@ def helper_tc_allclose(n:int, m:int, k:int, dtype_in:DType, dtype_out:DType, axi
 def helper_tc_ensure_uops_and_opts_count(n: int, m:int, k:int, dtype_in:DType, dtype_out:DType, axis:int=0, tc_select:int=-1, tc_opt:int=0,
                                          ensure_triggered:bool=True):
   a, b = Tensor.rand(m, k, dtype=dtype_in), Tensor.rand(k, n, dtype=dtype_in)
-  r = a.matmul(b, acc_dtype=dtype_out)
+  r = a.matmul(b, dtype=dtype_out)
   sched = r.schedule()
   realized_ast = sched[-1].ast
   k = Kernel(realized_ast)
@@ -64,13 +65,13 @@ def helper_tc_ensure_uops_and_opts_count(n: int, m:int, k:int, dtype_in:DType, d
 class TestLinearizer(unittest.TestCase):
   def test_arg_dedup(self):
     # NOTE: this realize exists because Tensor.numpy calls .contiguous() internally
-    # without contiguous folding, rand.to("CLANG") and rand.contiguous().to("CLANG") are different UOps.
+    # without contiguous folding, rand.to("CPU") and rand.contiguous().to("CPU") are different UOps.
     # this test asserts they are the identical Buffer
     # having different buffers is fine for correctness, because the outputs match.
     a, b = Tensor.randn(4).realize(), Tensor.randn(4).realize()
     np_a, np_b = a.numpy(), b.numpy()
     c = ((a.shrink(((0, 2),)) - a.shrink(((2, 4),))) - (b.shrink(((0, 2),)) - b.shrink(((2, 4),))))
-    lowered = list(lower_schedule(c.schedule()))
+    lowered = [x[1] for x in lower_schedule(c.schedule())]
     for ei in lowered: ei.run()
     rawbufs = lowered[-1].bufs
     assert len(rawbufs) == 3 and set(rawbufs[1:]) == {a.lazydata.base.realized, b.lazydata.base.realized}
@@ -101,7 +102,7 @@ class TestLinearizer(unittest.TestCase):
     stores = [u for u in lin.uops if u.op is Ops.STORE]
     mutable_bufs = dedup(flatten([[x for x in u.src[0].toposort if x.op is Ops.DEFINE_GLOBAL] for u in stores]))
     assert len(mutable_bufs) == len(stores) == 2
-    assert [u.arg for u in mutable_bufs] == [0, 1]
+    self.assertSetEqual(set([u.arg for u in mutable_bufs]), set([0,1]))
 
   def _test_no_nested_ranges(self, lins, skip=None):
     for l in lins:
@@ -983,8 +984,8 @@ class TestLinearizer(unittest.TestCase):
 
   # NOTE: can reenable, it does work. it just makes BEAM slow
   @unittest.expectedFailure
-  @unittest.skipUnless(Device.DEFAULT == "CLANG", "test only for CLANG")
-  def test_upcast_with_locals_clang(self):
+  @unittest.skipUnless(Device.DEFAULT == "CPU", "test only for CPU")
+  def test_upcast_with_locals_cpu(self):
     out = Tensor.ones(64,64).contiguous() @ Tensor.ones(64,64).contiguous()
     k = Kernel(out.schedule()[-1].ast)
     k.apply_opt(Opt(OptOps.LOCAL, axis=0, arg=4))
@@ -1049,11 +1050,11 @@ class TestLinearizer(unittest.TestCase):
     for tensor_dtype, acc_dtype, expected_dtype in tests:
       if is_dtype_supported(tensor_dtype) and is_dtype_supported(acc_dtype) and is_dtype_supported(expected_dtype):
         a, b = Tensor.rand(8, 8, dtype=tensor_dtype), Tensor.rand(8, 8, dtype=tensor_dtype)
-        helper_arg_acc_dtype(a.sum(acc_dtype=acc_dtype), expected_dtype)
-        helper_arg_acc_dtype(a.matmul(b, acc_dtype=acc_dtype), expected_dtype)
-        helper_arg_acc_dtype(Tensor.einsum("ki,ij->kj", a, b, acc_dtype=acc_dtype), expected_dtype)
+        helper_arg_acc_dtype(a.sum(dtype=acc_dtype), expected_dtype)
+        helper_arg_acc_dtype(a.matmul(b, dtype=acc_dtype), expected_dtype)
+        helper_arg_acc_dtype(Tensor.einsum("ki,ij->kj", a, b, dtype=acc_dtype), expected_dtype)
         d, w = Tensor.rand(4, 8, 8, 8, dtype=tensor_dtype), Tensor.rand(8, 8, 2, 2, dtype=tensor_dtype)
-        helper_arg_acc_dtype(d.conv2d(w, acc_dtype=acc_dtype), expected_dtype)
+        helper_arg_acc_dtype(d.conv2d(w, dtype=acc_dtype), expected_dtype)
 
   @unittest.skipUnless(Device[Device.DEFAULT].renderer.tensor_cores, "test requires tensor cores")
   def test_tensor_cores(self):
@@ -1100,7 +1101,7 @@ class TestLinearizer(unittest.TestCase):
       for axis in range(9):
         a = Tensor.rand(16, 16, 29, 29, dtype=tc.dtype_in).realize()
         b = Tensor.rand(32, 16, 16, 16, dtype=tc.dtype_in).realize()
-        c = a.conv2d(b, padding=1, acc_dtype=tc.dtype_out)
+        c = a.conv2d(b, padding=1, dtype=tc.dtype_out)
         realized_ast, real_bufs = helper_realized_ast(c)
 
         k = Kernel(realized_ast)
@@ -1129,18 +1130,18 @@ class TestLinearizer(unittest.TestCase):
   def test_tensor_cores_unroll_phi(self):
     tc = Device[Device.DEFAULT].renderer.tensor_cores[0]
     x, y = Tensor.rand(128, 128, dtype=tc.dtype_in), Tensor.rand(128, 128, dtype=tc.dtype_in)
-    r = x.matmul(y, acc_dtype=tc.dtype_out)
+    r = x.matmul(y, dtype=tc.dtype_out)
     k = helper_linearizer_opt(r, [[Opt(OptOps.UNROLL, 0, 4)]], apply_tc=True, atol=3e-2, rtol=1e-3)[-1]
     for u in k.uops:
       if u.op is Ops.WMMA:
         assert u.src[-1].src[0].op != Ops.ASSIGN
 
   @unittest.skipUnless(Device[Device.DEFAULT].renderer.tensor_cores, "test requires tensor cores")
-  @unittest.skipIf(Device.DEFAULT in {"CLANG", "LLVM"}, "CLANG does not support using a different type for accumulation")
+  @unittest.skipIf(Device.DEFAULT in {"CPU", "LLVM"}, "CPU does not support using a different type for accumulation")
   def test_tensor_cores_unroll_casted_phi(self):
     tc = [tc for tc in Device[Device.DEFAULT].renderer.tensor_cores if tc.dtype_in != tc.dtype_out][0]
     x, y = Tensor.rand(128, 128, dtype=tc.dtype_in), Tensor.rand(128, 128, dtype=tc.dtype_in)
-    r = x.matmul(y, acc_dtype=tc.dtype_out)
+    r = x.matmul(y, dtype=tc.dtype_out)
     k = helper_linearizer_opt(r, [[Opt(OptOps.UNROLL, 0, 4)]], apply_tc=True, atol=3e-2, rtol=1e-3)[-1]
     for u in k.uops:
       if u.op is Ops.WMMA:
@@ -1148,12 +1149,12 @@ class TestLinearizer(unittest.TestCase):
         assert u.src[-1].src[0].op != Ops.ASSIGN
 
   @unittest.skipUnless(Device[Device.DEFAULT].renderer.tensor_cores, "test requires tensor cores")
-  @unittest.skipIf(Device.DEFAULT in {"CLANG", "LLVM"}, "CLANG does not support using a different type for accumulation")
+  @unittest.skipIf(Device.DEFAULT in {"CPU", "LLVM"}, "CPU does not support using a different type for accumulation")
   def test_tensor_cores_unroll_casted_phi_with_children(self):
     # all ASSIGN children are outside the loop
     tc = [tc for tc in Device[Device.DEFAULT].renderer.tensor_cores if tc.dtype_in != tc.dtype_out][0]
     x, y = Tensor.rand(128, 128, dtype=tc.dtype_in), Tensor.rand(128, 128, dtype=tc.dtype_in)
-    r = x.matmul(y, acc_dtype=tc.dtype_out).relu()
+    r = x.matmul(y, dtype=tc.dtype_out).relu()
     k = helper_linearizer_opt(r, [[Opt(OptOps.UNROLL, 0, 4)]], apply_tc=True, atol=3e-2, rtol=1e-3)[-1]
     for u in k.uops:
       if u.op is Ops.WMMA:
@@ -1434,8 +1435,8 @@ class TestFloat4(unittest.TestCase):
   # TODO: express opts below as auto opts
 
   def test_float4_basic(self):
-    a = Tensor.rand(2, 8).realize()
-    b = Tensor.rand(2, 8).realize()
+    a = Tensor.empty(2, 8).realize()
+    b = Tensor.empty(2, 8).realize()
     c = a + b
 
     s = c.schedule()[0]
@@ -1445,10 +1446,10 @@ class TestFloat4(unittest.TestCase):
 
     assert TestFloat4.count_float4(k) == (2, 1)
 
-  @unittest.skipIf(Device.DEFAULT in {"CLANG", "LLVM"} and AMX, "CLANG with AMX upcasts float up to size 16")
+  @unittest.skipIf(Device.DEFAULT in {"CPU", "LLVM"} and AMX, "CPU with AMX upcasts float up to size 16")
   def test_float4_multidim(self):
-    a = Tensor.rand(2, 8).realize()
-    b = Tensor.rand(2, 8).realize()
+    a = Tensor.empty(2, 8).realize()
+    b = Tensor.empty(2, 8).realize()
     c = a + b
 
     s = c.schedule()[0]
@@ -1462,11 +1463,11 @@ class TestFloat4(unittest.TestCase):
 
     assert TestFloat4.count_float4(k) == (4, 2)
 
-  @unittest.skipUnless(Device.DEFAULT in {"CLANG", "LLVM"} and AMX, "Only CLANG with AMX upcasts float up to size 16")
+  @unittest.skipUnless(Device.DEFAULT in {"CPU", "LLVM"} and AMX, "Only CPU with AMX upcasts float up to size 16")
   def test_float4_multidim_amx(self):
     def kernel_for_shape(size, shift):
-      a = Tensor.rand(2, size).realize()
-      b = Tensor.rand(2, size).realize()
+      a = Tensor.empty(2, size).realize()
+      b = Tensor.empty(2, size).realize()
       c = a + b
 
       s = c.schedule()[0]
@@ -1487,10 +1488,10 @@ class TestFloat4(unittest.TestCase):
     for i in range(len(sizes)):
       assert TestFloat4.count_float4(kernel_for_shape(sizes[i], shifts[i]), excepted_upcast_size[i]) == expected_output[i]
 
-  @unittest.skipIf(Device.DEFAULT in {"CLANG", "LLVM"} and AMX, "CLANG with AMX upcasts float up to size 16")
+  @unittest.skipIf(Device.DEFAULT in {"CPU", "LLVM"} and AMX, "CPU with AMX upcasts float up to size 16")
   def test_float4_unaligned_load(self):
-    a = Tensor.rand(9).realize().shrink(((1, 9),))
-    b = Tensor.rand(9).realize().shrink(((1, 9),))
+    a = Tensor.empty(9).realize().shrink(((1, 9),))
+    b = Tensor.empty(9).realize().shrink(((1, 9),))
     c = a + b
 
     s = c.schedule()[0]
@@ -1500,10 +1501,10 @@ class TestFloat4(unittest.TestCase):
 
     assert TestFloat4.count_float4(k) == (0, 1)
 
-  @unittest.skipIf(Device.DEFAULT in {"CLANG", "LLVM"} and AMX, "CLANG with AMX upcasts float up to size 16")
+  @unittest.skipIf(Device.DEFAULT in {"CPU", "LLVM"} and AMX, "CPU with AMX upcasts float up to size 16")
   def test_float4_multidim_unaligned_load(self):
-    a = Tensor.rand(2, 9).realize().shrink(((0, 2), (1, 9),))
-    b = Tensor.rand(2, 9).realize().shrink(((0, 2), (1, 9),))
+    a = Tensor.empty(2, 9).realize().shrink(((0, 2), (1, 9),))
+    b = Tensor.empty(2, 9).realize().shrink(((0, 2), (1, 9),))
     c = a + b
 
     s = c.schedule()[0]
@@ -1517,11 +1518,11 @@ class TestFloat4(unittest.TestCase):
 
     assert TestFloat4.count_float4(k) == (0, 2)
 
-  @unittest.skipUnless(Device.DEFAULT in {"CLANG", "LLVM"} and AMX, "Only CLANG with AMX upcasts float up to size 16")
+  @unittest.skipUnless(Device.DEFAULT in {"CPU", "LLVM"} and AMX, "Only CPU with AMX upcasts float up to size 16")
   def test_float4_multidim_unaligned_load_amx(self):
     def kernel_for_shape(size, shift):
-      a = Tensor.rand(2, size).realize().shrink(((0, 2), (1, size),))
-      b = Tensor.rand(2, size).realize().shrink(((0, 2), (1, size),))
+      a = Tensor.empty(2, size).realize().shrink(((0, 2), (1, size),))
+      b = Tensor.empty(2, size).realize().shrink(((0, 2), (1, size),))
       c = a + b
 
       s = c.schedule()[0]
@@ -1543,8 +1544,8 @@ class TestFloat4(unittest.TestCase):
       assert TestFloat4.count_float4(kernel_for_shape(sizes[i], shifts[i]), excepted_upcast_size[i]) == expected_output[i]
 
   def test_float4_sometimes_unaligned(self):
-    a = Tensor.rand(1, 1, 8).realize()
-    b = Tensor.rand(1, 1, 5).realize().shrink(((0, 1), (0, 1), (1, 5)))
+    a = Tensor.empty(1, 1, 8).realize()
+    b = Tensor.empty(1, 1, 5).realize().shrink(((0, 1), (0, 1), (1, 5)))
     c = a.conv2d(b)
     # only the first and last conv dot products are aligned in a, and b is never aligned, so no
     # float4 should be emitted (the reduce axis of size 4 is the float4 axis here)
@@ -1557,8 +1558,8 @@ class TestFloat4(unittest.TestCase):
     assert TestFloat4.count_float4(k) == (0, 0)
 
   def test_float4_multidim_sometimes_unaligned(self):
-    a = Tensor.rand(1, 1, 7).realize()
-    b = Tensor.rand(1, 1, 5).realize().shrink(((0, 1), (0, 1), (1, 5)))
+    a = Tensor.empty(1, 1, 7).realize()
+    b = Tensor.empty(1, 1, 5).realize().shrink(((0, 1), (0, 1), (1, 5)))
     c = a.conv2d(b)
     # the first conv dot product is aligned in a. If we upcast the output and reduce
     # dimension, then we could do float4 for only that one set of loads, but we currently
@@ -1574,8 +1575,8 @@ class TestFloat4(unittest.TestCase):
     assert TestFloat4.count_float4(k) in {(0,1), (1,1)}
 
   def test_float4_noncontiguous(self):
-    a = Tensor.rand(4, 2).realize()
-    b = Tensor.rand(4, 2).realize()
+    a = Tensor.empty(4, 2).realize()
+    b = Tensor.empty(4, 2).realize()
     c = a + b
 
     # we will upcast the top axis of sz 4. they should not be coalesced into float4,
@@ -1590,8 +1591,8 @@ class TestFloat4(unittest.TestCase):
     assert TestFloat4.count_float4(k) == (0, 0)
 
   def test_float4_expand(self):
-    a = Tensor.rand(9).realize().shrink(((1, 9),))
-    b = Tensor.rand(2).realize().reshape((2, 1)).expand((2,4)).reshape((8,))
+    a = Tensor.empty(9).realize().shrink(((1, 9),))
+    b = Tensor.empty(2).realize().reshape((2, 1)).expand((2,4)).reshape((8,))
     c = a + b
 
     # we will upcast the top axis of sz 4. they should not be coalesced into float4,
@@ -1606,8 +1607,8 @@ class TestFloat4(unittest.TestCase):
     assert TestFloat4.count_float4(k) == (0, 1)
 
   def test_float4_heterogeneous(self):
-    a = Tensor.rand(8).realize()
-    b = Tensor.rand(9).realize().shrink(((1, 9),))
+    a = Tensor.empty(8).realize()
+    b = Tensor.empty(9).realize().shrink(((1, 9),))
     c = a + b
 
     # should float4 b but not a
@@ -1703,8 +1704,8 @@ class TestFloat4(unittest.TestCase):
 
 class TestHandCodedOpts(unittest.TestCase):
   def test_masked_upcast(self):
-    layer_1 = Tensor.cat(*[Tensor.rand(5) for _ in range(4)])
-    layer_2 = Tensor.cat(layer_1.unsqueeze(0), Tensor.rand(6, 20))
+    layer_1 = Tensor.cat(*[Tensor.empty(5) for _ in range(4)])
+    layer_2 = Tensor.cat(layer_1.unsqueeze(0), Tensor.empty(6, 20))
 
     s = layer_2.schedule()[-1]
     k = Kernel(s.ast)
@@ -1717,7 +1718,7 @@ class TestHandCodedOpts(unittest.TestCase):
 
   @unittest.skipIf(Device.DEFAULT == "METAL", "METAL can only run kernels with up to 32 buffers")
   def test_masked_upcast_wino(self):
-    monster = Tensor.stack(*[Tensor.stack(*[Tensor.rand(16) for _ in range(6)]) for _ in range(6)])
+    monster = Tensor.stack(*[Tensor.stack(*[Tensor.empty(16) for _ in range(6)]) for _ in range(6)])
 
     s = monster.schedule()[-1]
     k = Kernel(s.ast)
@@ -1999,7 +2000,7 @@ class TestKernelOpts(unittest.TestCase):
       # bf16 buffer returns float32 numpy outputs so test would fail. testing opt with half suffices.
       if tc.dtype_in != dtypes.half and tc.dtype_out != dtypes.half: continue
       a, b = Tensor.rand(N, N, dtype=tc.dtype_in), Tensor.rand(N, N, dtype=tc.dtype_in)
-      r = a.matmul(b, acc_dtype=tc.dtype_out)
+      r = a.matmul(b, dtype=tc.dtype_out)
       (atol, rtol) = ((0.25, 0.01) if tc.dtype_out == dtypes.half else (3e-2, 1e-3)) if tc.dtype_in == dtypes.half else (1e-4, 1e-4)
       helper_linearizer_opt(r, [
         [],
@@ -2026,7 +2027,7 @@ class TestKernelOpts(unittest.TestCase):
       # bf16 buffer returns float32 numpy outputs so test would fail. testing opt with half suffices.
       if tc.dtype_in != dtypes.half and tc.dtype_out != dtypes.half: continue
       a, b = Tensor.rand(N, N, dtype=tc.dtype_in), Tensor.rand(N, N, dtype=tc.dtype_in)
-      r = a.matmul(b, acc_dtype=tc.dtype_out)
+      r = a.matmul(b, dtype=tc.dtype_out)
       (atol, rtol) = ((0.25, 0.01) if tc.dtype_out == dtypes.half else (3e-2, 1e-3)) if tc.dtype_in == dtypes.half else (1e-4, 1e-4)
       helper_linearizer_opt(r, [
         [Opt(OptOps.UNROLL, 0, 0)], # check full unroll of reduce with locals
@@ -2036,7 +2037,7 @@ class TestKernelOpts(unittest.TestCase):
       ], apply_tc=True, atol=atol, rtol=rtol)
 
   def test_padto_matmul(self):
-    if (CI and Device.DEFAULT in ["AMD", "NV", "CUDA"]) or Device.DEFAULT == "WEBGPU":
+    if (CI and Device.DEFAULT in ["AMD", "NV", "CUDA"]):
       self.skipTest("super slow on CUDA and AMD because of the big grid dims")
     N = 17 * 17
     Tensor.manual_seed(289)
@@ -2092,10 +2093,11 @@ class TestKernelOpts(unittest.TestCase):
       helper_linearizer_opt(a.sum(0), [[Opt(OptOps.PADTO, axis, 32)],])
       helper_linearizer_opt(b.sum(), [[Opt(OptOps.PADTO, axis, 32)],])
       helper_linearizer_opt(b.sum(0), [[Opt(OptOps.PADTO, axis, 32)],])
-      helper_linearizer_opt(b.sum(acc_dtype=dtypes.bool), [[Opt(OptOps.PADTO, axis, 32)],])
+      helper_linearizer_opt(b.sum(dtype=dtypes.bool), [[Opt(OptOps.PADTO, axis, 32)],])
+      # TODO: why?
       if Device.DEFAULT != "WEBGPU":
-        helper_linearizer_opt(b.sum(0, acc_dtype=dtypes.bool), [[Opt(OptOps.PADTO, axis, 32)],])
-        helper_linearizer_opt(b.sum(1, acc_dtype=dtypes.bool), [[Opt(OptOps.PADTO, axis, 32)],])
+        helper_linearizer_opt(b.sum(0, dtype=dtypes.bool), [[Opt(OptOps.PADTO, axis, 32)],])
+        helper_linearizer_opt(b.sum(1, dtype=dtypes.bool), [[Opt(OptOps.PADTO, axis, 32)],])
 
     # having unsafe ops after sum is fine
     helper_linearizer_opt(a.sum().exp(), [[Opt(OptOps.PADTO, 0, 32)],])
@@ -2138,7 +2140,6 @@ class TestKernelOpts(unittest.TestCase):
     with self.assertRaises(KernelOptError):
       helper_linearizer_opt(a.max(0), [[Opt(OptOps.PADTO, 1, 32)],])
 
-  @unittest.skipIf(Device.DEFAULT == "WEBGPU", "max dimensions exceeded on WebGPU")
   def test_padto_where(self):
     Tensor.manual_seed(0)
     N = 17 * 17
@@ -2148,7 +2149,6 @@ class TestKernelOpts(unittest.TestCase):
       [Opt(OptOps.PADTO, 0, 32), Opt(OptOps.UPCAST, 0, 8),],
     ])
 
-  @unittest.skipIf(Device.DEFAULT == "WEBGPU", "max dimensions exceeded on WebGPU")
   def test_padto_where_multioutput(self):
     Tensor.manual_seed(0)
     N = 17 * 17
